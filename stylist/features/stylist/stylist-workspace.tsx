@@ -2,6 +2,7 @@
 
 import { useEffect, useState, type FormEvent } from "react";
 import Image from "next/image";
+import { usePathname, useRouter } from "next/navigation";
 import {
   ArrowDownRight,
   ArrowRight,
@@ -12,6 +13,7 @@ import {
   CircleHelp,
   Heart,
   House,
+  LoaderCircle,
   LogIn,
   LogOut,
   MessageCircle,
@@ -64,6 +66,24 @@ function uid(prefix: string) {
   return `${prefix}-${globalThis.crypto?.randomUUID?.() ?? Date.now()}`;
 }
 
+function maskMeasurement(value: string, maxIntegerDigits: number, maxDecimalDigits: number) {
+  const input = value.replace(/[^\d.,]/g, "");
+  const separator = input.search(/[.,]/);
+  if (separator >= 0) {
+    const integer = input.slice(0, separator).replace(/\D/g, "").slice(0, maxIntegerDigits);
+    const decimal = input.slice(separator + 1).replace(/\D/g, "").slice(0, maxDecimalDigits);
+    return decimal ? `${integer},${decimal}` : `${integer},`;
+  }
+
+  const digits = input.replace(/\D/g, "").slice(0, maxIntegerDigits + maxDecimalDigits);
+  if (maxIntegerDigits === 1 && digits.length > 1) return `${digits[0]},${digits.slice(1)}`;
+  return digits;
+}
+
+function parseMeasurement(value: string) {
+  return Number(value.replace(",", "."));
+}
+
 function Field({ label, ...props }: { label: string } & React.InputHTMLAttributes<HTMLInputElement>) {
   return (
     <label className="grid gap-2 text-xs font-semibold text-[#555d50]">
@@ -88,7 +108,9 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
 }
 
 export default function StylistWorkspace() {
-  const [section, setSection] = useState<Section>("inicio");
+  const pathname = usePathname();
+  const router = useRouter();
+  const section = (pathname === "/" ? "inicio" : pathname.slice(1)) as Section;
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(!auth);
   const [items, setItems] = useState(demoItems);
@@ -104,9 +126,13 @@ export default function StylistWorkspace() {
   const [registering, setRegistering] = useState(false);
   const [sharing, setSharing] = useState(false);
   const [itemDraft, setItemDraft] = useState(emptyDraft);
+  const [itemError, setItemError] = useState("");
+  const [profileErrors, setProfileErrors] = useState<{ height?: string; weight?: string }>({});
   const [authError, setAuthError] = useState("");
   const [notice, setNotice] = useState("");
+  const [noticeType, setNoticeType] = useState<"success" | "error">("success");
   const [busy, setBusy] = useState(false);
+  const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [commentsOpen, setCommentsOpen] = useState<string | null>(null);
 
   useEffect(() => {
@@ -123,7 +149,10 @@ export default function StylistWorkspace() {
 
   useEffect(() => {
     if (!currentUser) return;
-    const reportError = () => setNotice("Não foi possível sincronizar com o Firestore. Confira as regras do projeto.");
+    const reportError = () => {
+      setNoticeType("error");
+      setNotice("Não foi possível sincronizar com o Firestore. Confira as regras do projeto.");
+    };
     const stopItems = watchItems(currentUser.uid, setItems, reportError);
     const stopOutfits = watchOutfits(currentUser.uid, setOutfits, reportError);
     const stopProfile = watchProfile(currentUser.uid, (saved) => setProfile((previous) => ({ ...previous, ...saved })), reportError);
@@ -146,6 +175,17 @@ export default function StylistWorkspace() {
   });
   const favoriteCount = outfits.filter((outfit) => outfit.favorite).length;
 
+  function showNotice(message: string, type: "success" | "error" = "success") {
+    setNotice(message);
+    setNoticeType(type);
+  }
+
+  function navigateToSection(nextSection: Section) {
+    router.push(nextSection === "inicio" ? "/" : `/${nextSection}`);
+  }
+
+  if (!navItems.some(({ id }) => id === section)) return null;
+
   function openItemEditor(item?: WardrobeItem) {
     setEditingItem(item ?? null);
     setItemDraft(item ? { name: item.name, category: item.category, type: item.type, color: item.color, imageUrl: item.imageUrl } : emptyDraft);
@@ -154,32 +194,40 @@ export default function StylistWorkspace() {
 
   async function submitItem(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!itemDraft.name.trim() || !itemDraft.type.trim() || !itemDraft.color.trim()) {
+      setItemError("Preencha o nome, tipo e cor da peça.");
+      return;
+    }
+    setItemError("");
     const item: WardrobeItem = {
       id: editingItem?.id ?? uid("item"),
       ...itemDraft,
       createdAt: editingItem?.createdAt ?? Date.now(),
     };
-    if (currentUser) {
-      try { await saveItem(currentUser.uid, item); }
-      catch { setNotice("Não foi possível salvar a peça. Tente novamente."); return; }
-    } else {
-      setItems((previous) => editingItem ? previous.map((entry) => entry.id === item.id ? item : entry) : [item, ...previous]);
+    setPendingAction("item");
+    try {
+      if (currentUser) await saveItem(currentUser.uid, item);
+      else setItems((previous) => editingItem ? previous.map((entry) => entry.id === item.id ? item : entry) : [item, ...previous]);
+      setItemModal(false);
+      showNotice(editingItem ? "Peça atualizada." : "Peça adicionada ao closet.");
+    } catch {
+      showNotice("Não foi possível salvar a peça. Tente novamente.", "error");
+    } finally {
+      setPendingAction(null);
     }
-    setItemModal(false);
-    setNotice(editingItem ? "Peça atualizada." : "Peça adicionada ao closet.");
   }
 
   async function deleteWardrobeItem(item: WardrobeItem) {
     if (!window.confirm(`Remover “${item.name}” do closet?`)) return;
     if (currentUser && !item.id.startsWith("item-")) {
       try { await removeItem(currentUser.uid, item.id); }
-      catch { setNotice("Não foi possível remover a peça."); return; }
+      catch { showNotice("Não foi possível remover a peça.", "error"); return; }
     } else {
       setItems((previous) => previous.filter((entry) => entry.id !== item.id));
     }
     setOutfits((previous) => previous.map((outfit) => ({ ...outfit, itemIds: outfit.itemIds.filter((id) => id !== item.id) })));
     setSelected((previous) => previous.filter((id) => id !== item.id));
-    setNotice("Peça removida do closet.");
+    showNotice("Peça removida do closet.");
   }
 
   async function createOutfit() {
@@ -187,28 +235,44 @@ export default function StylistWorkspace() {
     const outfit: Outfit = { id: uid("look"), name: `Look ${String(outfits.length + 1).padStart(2, "0")}`, itemIds: selected, favorite: false, createdAt: Date.now() };
     if (currentUser) {
       try { await saveOutfit(currentUser.uid, outfit); }
-      catch { setNotice("Não foi possível salvar o look."); return; }
+      catch { showNotice("Não foi possível salvar o look.", "error"); return; }
     } else setOutfits((previous) => [outfit, ...previous]);
     setSelected([]);
-    setSection("looks");
-    setNotice("Look salvo. Uma boa combinação começa assim.");
+    navigateToSection("looks");
+    showNotice("Look salvo. Uma boa combinação começa assim.");
   }
 
   async function toggleFavorite(outfit: Outfit) {
     const updated = { ...outfit, favorite: !outfit.favorite };
     if (currentUser) {
       try { await saveOutfit(currentUser.uid, updated); }
-      catch { setNotice("Não foi possível atualizar o favorito."); return; }
+      catch { showNotice("Não foi possível atualizar o favorito.", "error"); return; }
     } else setOutfits((previous) => previous.map((entry) => entry.id === outfit.id ? updated : entry));
   }
 
   async function submitProfile(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (currentUser) {
-      try { await saveProfile(currentUser.uid, { ...profile, email: currentUser.email ?? profile.email }); }
-      catch { setNotice("Não foi possível salvar seu perfil."); return; }
+    const nextErrors: { height?: string; weight?: string } = {};
+    const height = parseMeasurement(profile.height);
+    const weight = parseMeasurement(profile.weight);
+    if (profile.height.trim() && (!Number.isFinite(height) || height < 0.5 || height > 2.5)) {
+      nextErrors.height = "Informe uma altura entre 0,50 m e 2,50 m.";
     }
-    setNotice("Perfil atualizado.");
+    if (profile.weight.trim() && (!Number.isFinite(weight) || weight < 1 || weight > 500)) {
+      nextErrors.weight = "Informe um peso entre 1 kg e 500 kg.";
+    }
+    setProfileErrors(nextErrors);
+    if (Object.keys(nextErrors).length) return;
+
+    setPendingAction("profile");
+    try {
+      if (currentUser) await saveProfile(currentUser.uid, { ...profile, email: currentUser.email ?? profile.email });
+      showNotice("Perfil atualizado.");
+    } catch {
+      showNotice("Não foi possível salvar seu perfil.", "error");
+    } finally {
+      setPendingAction(null);
+    }
   }
 
   async function submitAuth(event: FormEvent<HTMLFormElement>) {
@@ -244,20 +308,25 @@ export default function StylistWorkspace() {
       handle: currentUser?.email?.split("@")[0] ?? "marinacosta", avatar: initials,
       imageUrl, caption, likes: [], commentsCount: 0, createdAt: Date.now(),
     };
-    if (currentUser) {
-      try { await savePost(post); }
-      catch { setNotice("Não foi possível publicar. Verifique as permissões do feed."); return; }
-    } else setPosts((previous) => [{ ...post, id: uid("post") }, ...previous]);
-    setSharing(false);
-    setSection("feed");
-    setNotice("Seu look já está no feed.");
+    setPendingAction("post");
+    try {
+      if (currentUser) await savePost(post);
+      else setPosts((previous) => [{ ...post, id: uid("post") }, ...previous]);
+      setSharing(false);
+      navigateToSection("feed");
+      showNotice("Seu look já está no feed.");
+    } catch {
+      showNotice("Não foi possível publicar. Verifique as permissões do feed.", "error");
+    } finally {
+      setPendingAction(null);
+    }
   }
 
   async function likePost(post: CommunityPost) {
     const liked = post.likes.includes(currentUser?.uid ?? "demo-user");
     if (currentUser) {
       try { await toggleLike(post.id, currentUser.uid, liked); }
-      catch { setNotice("Entre na comunidade para curtir publicações."); }
+      catch { showNotice("Entre na comunidade para curtir publicações.", "error"); }
     } else setPosts((previous) => previous.map((entry) => entry.id !== post.id ? entry : { ...entry, likes: liked ? entry.likes.filter((id) => id !== "demo-user") : [...entry.likes, "demo-user"] }));
   }
 
@@ -268,10 +337,10 @@ export default function StylistWorkspace() {
     if (!text) return;
     if (currentUser) {
       try { await addComment(post.id, currentUser.uid, displayName, text); }
-      catch { setNotice("Não foi possível enviar o comentário."); return; }
+      catch { showNotice("Não foi possível enviar o comentário.", "error"); return; }
     } else setPosts((previous) => previous.map((entry) => entry.id === post.id ? { ...entry, commentsCount: entry.commentsCount + 1 } : entry));
     event.currentTarget.reset();
-    setNotice("Comentário enviado.");
+    showNotice("Comentário enviado.");
   }
 
   function ImageTile({ item, selectable = false }: { item: WardrobeItem; selectable?: boolean }) {
@@ -321,13 +390,12 @@ export default function StylistWorkspace() {
   return (
     <div className="app-grain min-h-screen lg:grid lg:grid-cols-[252px_minmax(0,1fr)]">
       <aside className="hidden min-h-screen flex-col border-r border-[#e1dfd7] bg-[#f8f7f2] px-6 py-7 lg:sticky lg:top-0 lg:flex lg:h-screen">
-        <button type="button" onClick={() => setSection("inicio")} className="flex items-center gap-3 text-left" aria-label="Stylist, início">
-          <span className="brand-icon relative grid size-10 place-items-center bg-[#314c3c] text-[#8a2be2]"><Sparkles size={23} strokeWidth={1.5} /></span>
-          <span><span className="font-display text-[25px] leading-none tracking-tight text-[#314c3c]">STYLIST</span><span className="mt-1 block text-[9px] font-semibold uppercase tracking-[0.22em] text-[#8a8d82]">YOUR WARDROBE</span></span>
+        <button type="button" onClick={() => navigateToSection("inicio")} className="flex items-center gap-3 text-left" aria-label="Stylist, início">
+          <span className="relative block h-[108px] w-[190px] bg-black"><Image src="/logo-stylist-complete.jpeg" alt="Stylist Your Wardrobe" fill priority sizes="190px" className="object-contain" /></span>
         </button>
         <div className="mb-3 mt-14 px-3 text-[9px] font-bold uppercase tracking-[0.19em] text-[#9b9b90]">Seu espaço</div>
         <nav className="grid gap-1" aria-label="Navegação principal">
-          {navItems.map(({ id, label, icon: Icon }) => <button key={id} type="button" onClick={() => setSection(id)} className={`flex h-11 items-center gap-3 px-3 text-left text-[13px] transition ${section === id ? "bg-[#e7ebe4] font-semibold text-[#314c3c]" : "text-[#777c70] hover:bg-[#eeede7] hover:text-[#354238]"}`}><Icon size={17} strokeWidth={1.8} />{label}{id === "looks" ? <span className="ml-auto text-[11px] text-[#a1a298]">{outfits.length}</span> : null}</button>)}
+          {navItems.map(({ id, label, icon: Icon }) => <button key={id} type="button" onClick={() => navigateToSection(id)} aria-current={section === id ? "page" : undefined} className={`flex h-11 items-center gap-3 px-3 text-left text-[13px] transition ${section === id ? "bg-[#e7ebe4] font-semibold text-[#314c3c]" : "text-[#777c70] hover:bg-[#eeede7] hover:text-[#354238]"}`}><Icon size={17} strokeWidth={1.8} />{label}{id === "looks" ? <span className="ml-auto text-[11px] text-[#a1a298]">{outfits.length}</span> : null}</button>)}
         </nav>
         <div className="mt-auto border-t border-[#e5e3dc] pt-5">
           <div className="mb-4 flex items-center gap-3">
@@ -340,8 +408,8 @@ export default function StylistWorkspace() {
       </aside>
 
       <div className="min-w-0">
-        <header className="sticky top-0 z-20 flex h-[66px] items-center justify-between border-b border-[#e1dfd7] bg-[#f5f3ed]/95 px-4 backdrop-blur sm:px-8 lg:px-12">
-          <button type="button" onClick={() => setSection("inicio")} className="flex items-center gap-2.5 lg:hidden"><span className="brand-icon grid size-8 place-items-center bg-[#314c3c] text-[#8a2be2]"><Sparkles size={18} /></span><span className="font-display text-[22px] text-[#314c3c]">STYLIST</span></button>
+        <header className="sticky top-0 z-20 flex h-[78px] items-center justify-between border-b border-[#e1dfd7] bg-[#f5f3ed]/95 px-4 backdrop-blur sm:px-8 lg:h-[66px] lg:px-12">
+          <button type="button" onClick={() => navigateToSection("inicio")} className="flex items-center lg:hidden"><span className="relative block h-[74px] w-[130px] bg-black"><Image src="/logo-stylist-complete.jpeg" alt="Stylist Your Wardrobe" fill priority sizes="130px" className="object-contain" /></span></button>
           <div className="hidden items-center gap-2 text-xs text-[#96968c] lg:flex"><span>Seu espaço</span><span>/</span><span className="font-medium text-[#4b5349]">{navItems.find((item) => item.id === section)?.label}</span></div>
           <div className="ml-auto flex items-center gap-3">
             {!firebaseEnabled ? <span className="hidden items-center gap-1.5 border border-[#e4d9c3] bg-[#f5eddf] px-2.5 py-1.5 text-[10px] font-medium text-[#897047] sm:flex"><span className="size-1.5 rounded-full bg-[#c79b55]" />Modo demonstração</span> : null}
@@ -349,8 +417,8 @@ export default function StylistWorkspace() {
           </div>
         </header>
 
-        <nav className="sticky top-[66px] z-20 flex overflow-x-auto border-b border-[#e5e3dc] bg-[#f8f7f2] px-3 py-2 lg:hidden" aria-label="Navegação móvel">
-          {navItems.map(({ id, label, icon: Icon }) => <button key={id} type="button" onClick={() => setSection(id)} className={`flex min-h-10 shrink-0 items-center gap-2 px-3 text-xs ${section === id ? "border-b-2 border-[#48624d] font-semibold text-[#314c3c]" : "text-[#777c70]"}`}><Icon size={15} />{label}</button>)}
+        <nav className="sticky top-[78px] z-20 flex overflow-x-auto border-b border-[#e5e3dc] bg-[#f8f7f2] px-3 py-2 lg:hidden" aria-label="Navegação móvel">
+          {navItems.map(({ id, label, icon: Icon }) => <button key={id} type="button" onClick={() => navigateToSection(id)} aria-current={section === id ? "page" : undefined} className={`flex min-h-10 shrink-0 items-center gap-2 px-3 text-xs ${section === id ? "border-b-2 border-[#48624d] font-semibold text-[#314c3c]" : "text-[#777c70]"}`}><Icon size={15} />{label}</button>)}
           {!currentUser ? <button type="button" onClick={() => { setRegistering(false); setAuthModal(true); }} className="ml-auto flex shrink-0 items-center gap-1.5 px-3 text-xs font-semibold text-[#48624d]"><LogIn size={15} />Entrar</button> : <button type="button" onClick={() => auth && void signOut(auth)} aria-label="Sair da conta" className="ml-auto grid size-10 shrink-0 place-items-center text-[#777c70]"><LogOut size={15} /></button>}
         </nav>
 
@@ -374,7 +442,7 @@ export default function StylistWorkspace() {
                   <span className="mb-5 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.2em] text-[#d4d5c7]"><Sparkles size={13} />Um bom dia começa no espelho</span>
                   <h2 className="font-display max-w-md text-[36px] leading-[1.04] sm:text-[45px]">Menos peças.<br />Mais possibilidades.</h2>
                   <p className="mt-4 max-w-sm text-sm leading-6 text-[#d0d5ca]">Você já tem {items.length} peças para criar algo novo hoje.</p>
-                  <button type="button" onClick={() => { setSelected([]); setSection("looks"); }} className="mt-7 flex h-11 items-center gap-3 border border-white/35 px-4 text-xs font-semibold text-white transition hover:bg-white/10">Montar um look <ArrowRight size={15} /></button>
+                  <button type="button" onClick={() => { setSelected([]); navigateToSection("looks"); }} className="mt-7 flex h-11 items-center gap-3 border border-white/35 px-4 text-xs font-semibold text-white transition hover:bg-white/10">Montar um look <ArrowRight size={15} /></button>
                   <span className="absolute bottom-4 right-5 font-display text-[11px] italic text-white/50">seu estilo, em movimento</span>
                 </div>
                 <div className="absolute inset-y-0 right-0 -z-0 w-full sm:w-[58%] lg:relative lg:z-0 lg:w-full">
@@ -385,16 +453,16 @@ export default function StylistWorkspace() {
               </section>
               <div className="mt-8 grid gap-8 lg:grid-cols-[1.4fr_0.8fr]">
                 <section>
-                  <div className="mb-4 flex items-end justify-between"><div><p className="text-[9px] font-bold uppercase tracking-[0.18em] text-[#999a90]">BONS DE TER À MÃO</p><h2 className="mt-1 font-display text-[25px] text-[#333c32]">Peças recentes</h2></div><button type="button" onClick={() => setSection("closet")} className="flex items-center gap-1 pb-1 text-xs font-semibold text-[#58705c]">Ver closet <ArrowRight size={13} /></button></div>
+                  <div className="mb-4 flex items-end justify-between"><div><p className="text-[9px] font-bold uppercase tracking-[0.18em] text-[#999a90]">BONS DE TER À MÃO</p><h2 className="mt-1 font-display text-[25px] text-[#333c32]">Peças recentes</h2></div><button type="button" onClick={() => navigateToSection("closet")} className="flex items-center gap-1 pb-1 text-xs font-semibold text-[#58705c]">Ver closet <ArrowRight size={13} /></button></div>
                   <div className="grid grid-cols-2 gap-x-4 gap-y-6 sm:grid-cols-3">{items.slice(0, 3).map((item) => <ImageTile key={item.id} item={item} />)}</div>
                 </section>
                 <section className="border-t border-[#e3e1d9] pt-6 lg:border-l lg:border-t-0 lg:pl-7 lg:pt-0">
-                  <div className="mb-5 flex items-end justify-between"><div><p className="text-[9px] font-bold uppercase tracking-[0.18em] text-[#999a90]">SEU JEITO DE COMBINAR</p><h2 className="mt-1 font-display text-[25px] text-[#333c32]">Em destaque</h2></div><button type="button" onClick={() => setSection("looks")} aria-label="Ver todos os looks" className="grid size-8 place-items-center rounded-full border border-[#dfded7] text-[#647061]"><ArrowDownRight size={15} /></button></div>
+                  <div className="mb-5 flex items-end justify-between"><div><p className="text-[9px] font-bold uppercase tracking-[0.18em] text-[#999a90]">SEU JEITO DE COMBINAR</p><h2 className="mt-1 font-display text-[25px] text-[#333c32]">Em destaque</h2></div><button type="button" onClick={() => navigateToSection("looks")} aria-label="Ver todos os looks" className="grid size-8 place-items-center rounded-full border border-[#dfded7] text-[#647061]"><ArrowDownRight size={15} /></button></div>
                   {outfits.slice(0, 2).map((outfit) => <div key={outfit.id} className="mb-3 flex items-center gap-3 border-b border-[#e7e5de] pb-3"><div className="flex -space-x-2">{outfit.itemIds.slice(0, 3).map((id) => { const item = items.find((entry) => entry.id === id); return <span key={id} className="relative size-10 overflow-hidden rounded-full border-2 border-[#f5f3ed] bg-[#e7e4db]"><Image src={item?.imageUrl || heroImage} alt="" fill unoptimized sizes="40px" className="object-cover" /></span>; })}</div><div className="min-w-0 flex-1"><span className="block truncate text-xs font-semibold text-[#42483f]">{outfit.name}</span><span className="mt-1 block text-[10px] text-[#94958b]">{outfit.itemIds.length} peças</span></div>{outfit.favorite ? <Heart size={15} className="text-[#bf705c]" fill="currentColor" /> : null}</div>)}
                   <p className="mt-5 flex items-center gap-2 text-[11px] text-[#888b80]"><Bookmark size={13} />{favoriteCount} looks favoritos</p>
                 </section>
               </div>
-              <section className="mt-10 border-t border-[#e3e1d9] pt-7"><div className="mb-4 flex items-center justify-between"><div><p className="text-[9px] font-bold uppercase tracking-[0.18em] text-[#999a90]">DA COMUNIDADE</p><h2 className="mt-1 font-display text-[25px] text-[#333c32]">Uma ideia para levar</h2></div><button type="button" onClick={() => setSection("feed")} className="flex items-center gap-1 text-xs font-semibold text-[#58705c]">Abrir feed <ArrowRight size={13} /></button></div><div className="flex items-center gap-4 border-y border-[#e4e2db] py-4"><span className="relative size-12 shrink-0 overflow-hidden rounded-full bg-[#e7e4db]"><Image src={posts[0]?.imageUrl ?? heroImage} alt="" fill unoptimized sizes="48px" className="object-cover" /></span><p className="min-w-0 flex-1 text-sm leading-6 text-[#656c61]">“{posts[0]?.caption ?? "Compartilhe seu próximo look com a comunidade."}”</p><span className="hidden text-xs font-semibold text-[#42483f] sm:block">{posts[0]?.author}</span></div></section>
+              <section className="mt-10 border-t border-[#e3e1d9] pt-7"><div className="mb-4 flex items-center justify-between"><div><p className="text-[9px] font-bold uppercase tracking-[0.18em] text-[#999a90]">DA COMUNIDADE</p><h2 className="mt-1 font-display text-[25px] text-[#333c32]">Uma ideia para levar</h2></div><button type="button" onClick={() => navigateToSection("feed")} className="flex items-center gap-1 text-xs font-semibold text-[#58705c]">Abrir feed <ArrowRight size={13} /></button></div><div className="flex items-center gap-4 border-y border-[#e4e2db] py-4"><span className="relative size-12 shrink-0 overflow-hidden rounded-full bg-[#e7e4db]"><Image src={posts[0]?.imageUrl ?? heroImage} alt="" fill unoptimized sizes="48px" className="object-cover" /></span><p className="min-w-0 flex-1 text-sm leading-6 text-[#656c61]">“{posts[0]?.caption ?? "Compartilhe seu próximo look com a comunidade."}”</p><span className="hidden text-xs font-semibold text-[#42483f] sm:block">{posts[0]?.author}</span></div></section>
             </> : null}
 
             {section === "closet" ? <>
@@ -404,7 +472,7 @@ export default function StylistWorkspace() {
             </> : null}
 
             {section === "looks" ? <>
-              <div className="mb-8 flex flex-col justify-between gap-5 sm:flex-row sm:items-end"><div><p className="mb-3 text-[10px] font-bold uppercase tracking-[0.2em] text-[#929287]">{sectionTitle.looks.eyebrow}</p><h1 className="font-display text-[42px] leading-none text-[#29362c]">Looks salvos<span className="ml-2 align-top font-sans text-[13px] font-medium text-[#9b9b90]">{outfits.length}</span></h1><p className="mt-3 text-sm text-[#7e8176]">Escolha peças abaixo para montar uma combinação.</p></div><button type="button" onClick={() => setSection("closet")} className="flex h-11 items-center justify-center gap-2 border border-[#d7d8ce] px-4 text-xs font-semibold text-[#425a47] hover:bg-[#e9ece5]"><Shirt size={15} />Explorar closet</button></div>
+              <div className="mb-8 flex flex-col justify-between gap-5 sm:flex-row sm:items-end"><div><p className="mb-3 text-[10px] font-bold uppercase tracking-[0.2em] text-[#929287]">{sectionTitle.looks.eyebrow}</p><h1 className="font-display text-[42px] leading-none text-[#29362c]">Looks salvos<span className="ml-2 align-top font-sans text-[13px] font-medium text-[#9b9b90]">{outfits.length}</span></h1><p className="mt-3 text-sm text-[#7e8176]">Escolha peças abaixo para montar uma combinação.</p></div><button type="button" onClick={() => navigateToSection("closet")} className="flex h-11 items-center justify-center gap-2 border border-[#d7d8ce] px-4 text-xs font-semibold text-[#425a47] hover:bg-[#e9ece5]"><Shirt size={15} />Explorar closet</button></div>
               <div className="mb-10 border-y border-[#e2e0d8] py-4"><div className="mb-4 flex flex-wrap items-center justify-between gap-3"><p className="text-[10px] font-bold uppercase tracking-[0.16em] text-[#85877d]">Selecione duas ou mais peças</p><button type="button" disabled={selected.length < 2} onClick={() => void createOutfit()} className="flex h-9 items-center gap-2 bg-[#314c3c] px-3 text-xs font-semibold text-white transition hover:bg-[#253b2d] disabled:cursor-not-allowed disabled:bg-[#b5b9af]"><Plus size={14} />Criar look{selected.length ? ` · ${selected.length}` : ""}</button></div><div className="grid grid-cols-2 gap-x-4 gap-y-6 sm:grid-cols-4 lg:grid-cols-5">{items.map((item) => <ImageTile key={item.id} item={item} selectable />)}</div></div>
               <div className="mb-4 flex items-end justify-between"><div><p className="text-[9px] font-bold uppercase tracking-[0.18em] text-[#999a90]">SUAS COMBINAÇÕES</p><h2 className="mt-1 font-display text-[26px] text-[#333c32]">Prontos para repetir</h2></div><span className="text-xs text-[#8b8d83]">{favoriteCount} favoritos</span></div>
               {outfits.length ? <div className="grid gap-x-7 gap-y-8 sm:grid-cols-2 xl:grid-cols-3">{outfits.map((outfit) => <OutfitCard key={outfit.id} outfit={outfit} />)}</div> : <p className="border-y border-[#e3e1d9] py-8 text-sm text-[#85877d]">Ainda não há looks. Selecione algumas peças para começar.</p>}
@@ -412,20 +480,20 @@ export default function StylistWorkspace() {
 
             {section === "feed" ? <>
               <div className="mb-8 flex flex-col justify-between gap-5 sm:flex-row sm:items-end"><div><p className="mb-3 text-[10px] font-bold uppercase tracking-[0.2em] text-[#929287]">{sectionTitle.feed.eyebrow}</p><h1 className="font-display text-[42px] leading-none text-[#29362c]">Inspiração que circula.</h1><p className="mt-3 text-sm text-[#7e8176]">{sectionTitle.feed.detail}</p></div><button type="button" onClick={() => setSharing(true)} className="flex h-11 items-center justify-center gap-2 bg-[#314c3c] px-5 text-xs font-semibold text-white hover:bg-[#253b2d]"><Plus size={16} />Compartilhar look</button></div>
-              <div className="grid gap-7 lg:grid-cols-2">{posts.map((post) => {
+              {posts.length ? <div className="grid gap-7 lg:grid-cols-2">{posts.map((post) => {
                 const liked = post.likes.includes(currentUser?.uid ?? "demo-user");
                 return <article key={post.id} className="grid min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,0.9fr)] border-y border-[#e1dfd7] py-4 sm:gap-4">
                   <div className="relative min-h-60 overflow-hidden bg-[#e8e4db] sm:min-h-80"><Image src={post.imageUrl || heroImage} alt={`Look compartilhado por ${post.author}`} fill unoptimized sizes="(max-width: 1024px) 50vw, 25vw" className="object-cover" /><span className="absolute bottom-3 left-3 border border-white/50 bg-[#f8f7f2]/90 px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.1em] text-[#485347]">look do dia</span></div>
                   <div className="flex min-w-0 flex-col justify-between py-1 sm:py-2"><div><div className="flex items-center gap-2"><span className="grid size-8 shrink-0 place-items-center rounded-full bg-[#e8ddd2] text-[9px] font-bold text-[#685344]">{post.avatar}</span><span className="min-w-0"><span className="block truncate text-xs font-semibold text-[#40483e]">{post.author}</span><span className="block truncate text-[10px] text-[#999a90]">@{post.handle}</span></span></div><p className="mt-4 text-xs leading-[1.8] text-[#666d62]">{post.caption}</p></div><div><div className="flex items-center gap-4 border-t border-[#e7e5de] pt-3"><button type="button" onClick={() => void likePost(post)} aria-label={liked ? "Descurtir publicação" : "Curtir publicação"} className={`flex items-center gap-1.5 text-xs ${liked ? "text-[#c36350]" : "text-[#82867c] hover:text-[#c36350]"}`}><Heart size={16} fill={liked ? "currentColor" : "none"} />{post.likes.length + (liked && !post.likes.includes(currentUser?.uid ?? "demo-user") ? 1 : 0)}</button><button type="button" onClick={() => setCommentsOpen(commentsOpen === post.id ? null : post.id)} className="flex items-center gap-1.5 text-xs text-[#82867c] hover:text-[#4e6751]"><MessageCircle size={15} />{post.commentsCount} <span className="hidden sm:inline">comentários</span></button></div>{commentsOpen === post.id ? <form onSubmit={(event) => void commentOnPost(event, post)} className="mt-3 flex gap-2"><input name="comment" maxLength={240} required placeholder="Escreva um comentário" className="min-w-0 flex-1 border-b border-[#d7d8ce] bg-transparent py-2 text-[11px] outline-none placeholder:text-[#a2a397]" /><button type="submit" aria-label="Enviar comentário" className="text-[11px] font-semibold text-[#4f6b54]">Enviar</button></form> : null}</div></div>
                 </article>;
-              })}</div>
+              })}</div> : <div className="grid min-h-56 place-items-center border border-dashed border-[#d8d7ce] text-center"><div><Heart className="mx-auto text-[#92968b]" size={25} /><p className="mt-3 font-display text-xl text-[#384238]">O feed está tranquilo por enquanto.</p><p className="mt-1 text-xs text-[#888a80]">Compartilhe um look para iniciar a conversa.</p></div></div>}
             </> : null}
 
             {section === "perfil" ? <>
               <div className="mb-8"><p className="mb-3 text-[10px] font-bold uppercase tracking-[0.2em] text-[#929287]">{sectionTitle.perfil.eyebrow}</p><h1 className="font-display text-[42px] leading-none text-[#29362c]">Seu perfil</h1><p className="mt-3 text-sm text-[#7e8176]">{sectionTitle.perfil.detail}</p></div>
               <div className="grid gap-10 lg:grid-cols-[0.72fr_1.28fr]">
                 <section className="border-y border-[#e2e0d8] py-6"><div className="flex items-center gap-4"><span className="grid size-16 place-items-center rounded-full bg-[#e6d5c8] font-display text-[22px] text-[#6a5142]">{initials}</span><div><h2 className="font-display text-[25px] text-[#333c32]">{displayName}</h2><p className="mt-1 text-xs text-[#8d8f84]">{currentUser?.email ?? profile.email}</p></div></div><div className="mt-7 grid grid-cols-2 gap-3"><div className="bg-[#eae9e2] p-4"><span className="text-[9px] font-bold uppercase tracking-[0.16em] text-[#929388]">Altura</span><p className="mt-2 font-display text-2xl text-[#384238]">{profile.height || "—"}<span className="ml-1 text-xs">m</span></p></div><div className="bg-[#eae9e2] p-4"><span className="text-[9px] font-bold uppercase tracking-[0.16em] text-[#929388]">Peso</span><p className="mt-2 font-display text-2xl text-[#384238]">{profile.weight || "—"}<span className="ml-1 text-xs">kg</span></p></div></div><div className="mt-5 flex justify-between border-b border-[#e3e1d9] py-3 text-xs"><span className="text-[#85877d]">Peças no closet</span><span className="font-semibold text-[#485146]">{items.length}</span></div><div className="flex justify-between border-b border-[#e3e1d9] py-3 text-xs"><span className="text-[#85877d]">Looks favoritos</span><span className="font-semibold text-[#485146]">{favoriteCount}</span></div><p className="mt-5 flex items-start gap-2 text-[10px] leading-5 text-[#999a90]"><CircleHelp size={14} className="mt-0.5 shrink-0" />Suas medidas ficam visíveis apenas para você.</p></section>
-                <form onSubmit={(event) => void submitProfile(event)} className="grid content-start gap-5 border-y border-[#e2e0d8] py-6"><div className="mb-1"><p className="text-[9px] font-bold uppercase tracking-[0.17em] text-[#999a90]">INFORMAÇÕES PESSOAIS</p><h2 className="mt-1 font-display text-[26px] text-[#333c32]">Medidas e preferências</h2></div><Field label="Como podemos te chamar?" value={profile.name} onChange={(event) => setProfile((previous) => ({ ...previous, name: event.target.value }))} placeholder="Seu nome" /><div className="grid grid-cols-2 gap-4"><Field label="Altura (m)" inputMode="decimal" value={profile.height} onChange={(event) => setProfile((previous) => ({ ...previous, height: event.target.value }))} placeholder="1,68" /><Field label="Peso (kg)" inputMode="decimal" value={profile.weight} onChange={(event) => setProfile((previous) => ({ ...previous, weight: event.target.value }))} placeholder="58" /></div><label className="grid gap-2 text-xs font-semibold text-[#555d50]">Preferências de estilo<textarea rows={4} value={profile.stylePreferences} onChange={(event) => setProfile((previous) => ({ ...previous, stylePreferences: event.target.value }))} placeholder="Cores, referências, tecidos..." className="resize-y border border-[#dfded7] bg-white px-3 py-3 text-sm font-normal text-[#252b24] outline-none focus:border-[#58725f] focus:ring-2 focus:ring-[#58725f]/10" /></label><div><button type="submit" className="flex h-11 items-center gap-2 bg-[#314c3c] px-5 text-xs font-semibold text-white hover:bg-[#253b2d]"><Check size={15} />Salvar perfil</button></div></form>
+                <form onSubmit={(event) => void submitProfile(event)} className="grid content-start gap-5 border-y border-[#e2e0d8] py-6"><div className="mb-1"><p className="text-[9px] font-bold uppercase tracking-[0.17em] text-[#999a90]">INFORMAÇÕES PESSOAIS</p><h2 className="mt-1 font-display text-[26px] text-[#333c32]">Medidas e preferências</h2></div><Field label="Como podemos te chamar?" value={profile.name} onChange={(event) => setProfile((previous) => ({ ...previous, name: event.target.value }))} placeholder="Seu nome" /><div className="grid grid-cols-2 gap-4"><div className="grid content-start gap-2"><Field label="Altura (m)" inputMode="decimal" maxLength={4} aria-invalid={Boolean(profileErrors.height)} aria-describedby={profileErrors.height ? "height-error" : undefined} value={profile.height} onChange={(event) => { setProfile((previous) => ({ ...previous, height: maskMeasurement(event.target.value, 1, 2) })); setProfileErrors((previous) => ({ ...previous, height: undefined })); }} placeholder="1,68" />{profileErrors.height ? <p id="height-error" role="alert" className="text-[10px] leading-4 text-[#b74e3d]">{profileErrors.height}</p> : null}</div><div className="grid content-start gap-2"><Field label="Peso (kg)" inputMode="decimal" maxLength={5} aria-invalid={Boolean(profileErrors.weight)} aria-describedby={profileErrors.weight ? "weight-error" : undefined} value={profile.weight} onChange={(event) => { setProfile((previous) => ({ ...previous, weight: maskMeasurement(event.target.value, 3, 1) })); setProfileErrors((previous) => ({ ...previous, weight: undefined })); }} placeholder="58" />{profileErrors.weight ? <p id="weight-error" role="alert" className="text-[10px] leading-4 text-[#b74e3d]">{profileErrors.weight}</p> : null}</div></div><label className="grid gap-2 text-xs font-semibold text-[#555d50]">Preferências de estilo<textarea rows={4} value={profile.stylePreferences} onChange={(event) => setProfile((previous) => ({ ...previous, stylePreferences: event.target.value }))} placeholder="Cores, referências, tecidos..." className="resize-y border border-[#dfded7] bg-white px-3 py-3 text-sm font-normal text-[#252b24] outline-none focus:border-[#58725f] focus:ring-2 focus:ring-[#58725f]/10" /></label><div><button type="submit" disabled={pendingAction === "profile"} className="flex h-11 items-center gap-2 bg-[#314c3c] px-5 text-xs font-semibold text-white hover:bg-[#253b2d] disabled:cursor-wait disabled:opacity-60">{pendingAction === "profile" ? <><LoaderCircle size={15} className="animate-spin" />Salvando…</> : <><Check size={15} />Salvar perfil</>}</button></div></form>
               </div>
             </> : null}
           </div>
@@ -433,17 +501,18 @@ export default function StylistWorkspace() {
         </main>
       </div>
 
-      {notice ? <div role="status" className="fixed bottom-5 left-1/2 z-[60] flex max-w-[calc(100vw-32px)] -translate-x-1/2 items-center gap-2 border border-[#d8ded4] bg-[#fbfaf7] px-4 py-3 text-xs text-[#3f5944] shadow-lg"><Check size={15} />{notice}<button type="button" onClick={() => setNotice("")} aria-label="Fechar aviso" className="ml-2 text-[#85877d]"><X size={14} /></button></div> : null}
+      {notice ? <div role={noticeType === "error" ? "alert" : "status"} className={`fixed bottom-5 left-1/2 z-[60] flex max-w-[calc(100vw-32px)] -translate-x-1/2 items-center gap-2 border bg-[#fbfaf7] px-4 py-3 text-xs shadow-lg ${noticeType === "error" ? "border-[#e5c4bb] text-[#914937]" : "border-[#d8ded4] text-[#3f5944]"}`}><span aria-hidden="true">{noticeType === "error" ? <CircleHelp size={15} /> : <Check size={15} />}</span>{notice}<button type="button" onClick={() => setNotice("")} aria-label="Fechar aviso" className="ml-2 text-[#85877d]"><X size={14} /></button></div> : null}
       {!authReady ? <div className="fixed bottom-4 right-4 size-2 animate-pulse rounded-full bg-[#58725f]" aria-label="Conectando" /> : null}
 
       {itemModal ? <Modal title={editingItem ? "Editar peça" : "Nova peça no closet"} onClose={() => setItemModal(false)}>
         <form onSubmit={(event) => void submitItem(event)} className="grid gap-4">
-          <Field label="Nome da peça" required autoFocus value={itemDraft.name} onChange={(event) => setItemDraft((draft) => ({ ...draft, name: event.target.value }))} placeholder="Ex.: camisa de linho" />
-          <div className="grid grid-cols-2 gap-4"><label className="grid gap-2 text-xs font-semibold text-[#555d50]">Categoria<select value={itemDraft.category} onChange={(event) => setItemDraft((draft) => ({ ...draft, category: event.target.value }))} className="h-11 border border-[#dfded7] bg-white px-3 text-sm font-normal outline-none focus:border-[#58725f]"><option>Roupas</option><option>Calçados</option><option>Acessórios</option></select></label><Field label="Tipo" required value={itemDraft.type} onChange={(event) => setItemDraft((draft) => ({ ...draft, type: event.target.value }))} placeholder="Ex.: blusas" /></div>
-          <Field label="Cor principal" required value={itemDraft.color} onChange={(event) => setItemDraft((draft) => ({ ...draft, color: event.target.value }))} placeholder="Ex.: verde oliva" />
+          <Field label="Nome da peça" required autoFocus value={itemDraft.name} onChange={(event) => { setItemDraft((draft) => ({ ...draft, name: event.target.value })); setItemError(""); }} placeholder="Ex.: camisa de linho" />
+          <div className="grid grid-cols-2 gap-4"><label className="grid gap-2 text-xs font-semibold text-[#555d50]">Categoria<select value={itemDraft.category} onChange={(event) => setItemDraft((draft) => ({ ...draft, category: event.target.value }))} className="h-11 border border-[#dfded7] bg-white px-3 text-sm font-normal outline-none focus:border-[#58725f]"><option>Roupas</option><option>Calçados</option><option>Acessórios</option></select></label><Field label="Tipo" required value={itemDraft.type} onChange={(event) => { setItemDraft((draft) => ({ ...draft, type: event.target.value })); setItemError(""); }} placeholder="Ex.: blusas" /></div>
+          <Field label="Cor principal" required value={itemDraft.color} onChange={(event) => { setItemDraft((draft) => ({ ...draft, color: event.target.value })); setItemError(""); }} placeholder="Ex.: verde oliva" />
           <Field label="URL da imagem" type="url" value={itemDraft.imageUrl} onChange={(event) => setItemDraft((draft) => ({ ...draft, imageUrl: event.target.value }))} placeholder="https://..." />
+          {itemError ? <p role="alert" className="border-l-2 border-[#c56750] bg-[#f7eae5] px-3 py-2 text-xs text-[#914937]">{itemError}</p> : null}
           <p className="-mt-1 text-[10px] leading-5 text-[#929388]">Use um link público para a imagem. O arquivo fica associado à peça no seu closet.</p>
-          <button type="submit" className="mt-2 flex h-11 items-center justify-center gap-2 bg-[#314c3c] text-xs font-semibold text-white hover:bg-[#253b2d]"><Check size={15} />{editingItem ? "Salvar alterações" : "Adicionar ao closet"}</button>
+          <button type="submit" disabled={pendingAction === "item"} className="mt-2 flex h-11 items-center justify-center gap-2 bg-[#314c3c] text-xs font-semibold text-white hover:bg-[#253b2d] disabled:cursor-wait disabled:opacity-60">{pendingAction === "item" ? <><LoaderCircle size={15} className="animate-spin" />Salvando…</> : <><Check size={15} />{editingItem ? "Salvar alterações" : "Adicionar ao closet"}</>}</button>
         </form>
       </Modal> : null}
 
@@ -454,7 +523,7 @@ export default function StylistWorkspace() {
         {!firebaseEnabled ? <p className="mt-4 border-t border-[#e6e4dc] pt-4 text-center text-[10px] leading-5 text-[#96978d]">Você está explorando o modo demonstração. A configuração de conta será habilitada quando o Firebase estiver conectado.</p> : null}
       </Modal> : null}
 
-      {sharing ? <Modal title="Compartilhe seu jeito." onClose={() => setSharing(false)}><form onSubmit={(event) => void publishPost(event)} className="grid gap-4"><Field label="Imagem do look (URL)" type="url" name="imageUrl" required placeholder="https://..." /><label className="grid gap-2 text-xs font-semibold text-[#555d50]">Conte sobre esse look<textarea name="caption" required maxLength={400} rows={4} placeholder="De onde veio a inspiração?" className="resize-y border border-[#dfded7] bg-white px-3 py-3 text-sm font-normal outline-none focus:border-[#58725f]" /></label><p className="text-[10px] leading-5 text-[#929388]">Publicações ficam visíveis para membros autenticados da comunidade.</p><button type="submit" className="flex h-11 items-center justify-center gap-2 bg-[#314c3c] text-xs font-semibold text-white hover:bg-[#253b2d]"><Plus size={15} />Publicar no feed</button></form></Modal> : null}
+      {sharing ? <Modal title="Compartilhe seu jeito." onClose={() => setSharing(false)}><form onSubmit={(event) => void publishPost(event)} className="grid gap-4"><Field label="Imagem do look (URL)" type="url" name="imageUrl" required placeholder="https://..." /><label className="grid gap-2 text-xs font-semibold text-[#555d50]">Conte sobre esse look<textarea name="caption" required maxLength={400} rows={4} placeholder="De onde veio a inspiração?" className="resize-y border border-[#dfded7] bg-white px-3 py-3 text-sm font-normal outline-none focus:border-[#58725f]" /></label><p className="text-[10px] leading-5 text-[#929388]">Publicações ficam visíveis para membros autenticados da comunidade.</p><button type="submit" disabled={pendingAction === "post"} className="flex h-11 items-center justify-center gap-2 bg-[#314c3c] text-xs font-semibold text-white hover:bg-[#253b2d] disabled:cursor-wait disabled:opacity-60">{pendingAction === "post" ? <><LoaderCircle size={15} className="animate-spin" />Publicando…</> : <><Plus size={15} />Publicar no feed</>}</button></form></Modal> : null}
     </div>
   );
 }

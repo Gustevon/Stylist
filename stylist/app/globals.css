@@ -3,7 +3,7 @@
 
 :root {
   color-scheme: dark;
-  --background: #08090a;
+  --background: #000000;
   --foreground: #f1f0f4;
   --muted: #8d8c99;
   --line: #24232b;
@@ -33,7 +33,7 @@ body {
 button, input, select, textarea { font: inherit; }
 button { cursor: pointer; }
 
-::selection { background: #c6ff3d; color: #08090a; }
+::selection { background: #c6ff3d; color: #000000; }
 
 .font-display {
   font-family: "Racing Sans One", "Arial Narrow", sans-serif;
@@ -51,8 +51,8 @@ button { cursor: pointer; }
 .app-grain [class*="text-[#"] { color: #a3a2ad; }
 
 .app-grain [class~="bg-[#f5f3ed]"],
-.app-grain [class~="bg-[#f5f3ed]/95"] { background-color: #090a0c; }
-.app-grain [class~="bg-[#f8f7f2]"] { background-color: #0c0d0f; }
+.app-grain [class~="bg-[#f5f3ed]/95"],
+.app-grain [class~="bg-[#f8f7f2]"] { background-color: #000000; }
 .app-grain [class~="bg-[#fbfaf7]"] { background-color: #111216; }
 .app-grain [class~="bg-white"] { background-color: #15161a; }
 .app-grain [class~="bg-[#314c3c]"] { background-color: #c6ff3d; }
