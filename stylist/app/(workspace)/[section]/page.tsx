@@ -1,4 +1,5 @@
 import { notFound } from "next/navigation";
+import StylistWorkspace from "@/features/stylist/stylist-workspace";
 import type { Section } from "@/lib/stylist/types";
 
 const sections: Section[] = ["closet", "looks", "feed", "perfil"];
@@ -7,5 +8,5 @@ export default async function SectionPage({ params }: { params: Promise<{ sectio
   const { section } = await params;
   if (!sections.includes(section as Section)) notFound();
 
-  return null;
+  return <StylistWorkspace />;
 }
