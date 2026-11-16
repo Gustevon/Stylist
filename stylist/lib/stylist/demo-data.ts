@@ -3,6 +3,8 @@ import type { CommunityPost, Outfit, UserProfile, WardrobeItem } from "./types";
 export const demoProfile: UserProfile = {
   name: "Marina Costa",
   email: "marina@email.com",
+  bio: "Minimalismo, peças naturais e tons terrosos.",
+  photoURL: "/default-avatar.svg",
   height: "1,68",
   weight: "58",
   stylePreferences: "Minimalista, peças naturais e tons terrosos",

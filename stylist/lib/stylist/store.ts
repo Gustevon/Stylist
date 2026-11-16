@@ -13,12 +13,28 @@ import {
   updateDoc,
   type Unsubscribe,
 } from "firebase/firestore";
-import { db } from "@/lib/firebase/client";
+import { getDownloadURL, ref, uploadBytes } from "firebase/storage";
+import { db, storage } from "@/lib/firebase/client";
 import type { CommunityPost, Outfit, UserProfile, WardrobeItem } from "./types";
 
 function database() {
   if (!db) throw new Error("O Firebase não está configurado neste ambiente.");
   return db;
+}
+
+function fileStorage() {
+  if (!storage) throw new Error("Configure NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET para enviar imagens.");
+  return storage;
+}
+
+export async function uploadUserImage(uid: string, kind: "items" | "profile", key: string, file: File) {
+  if (!file.type.startsWith("image/")) throw new Error("Selecione um arquivo de imagem.");
+  if (file.size > 10 * 1024 * 1024) throw new Error("A imagem deve ter no máximo 10 MB.");
+
+  const imagePath = `users/${uid}/${kind}/${key}`;
+  const imageRef = ref(fileStorage(), imagePath);
+  await uploadBytes(imageRef, file, { contentType: file.type });
+  return { imageUrl: await getDownloadURL(imageRef), imagePath };
 }
 
 export function watchItems(uid: string, onItems: (items: WardrobeItem[]) => void, onError: (error: Error) => void): Unsubscribe {
@@ -54,7 +70,6 @@ export async function saveProfile(uid: string, profile: UserProfile) {
 export async function saveItem(uid: string, item: WardrobeItem) {
   const { id, ...data } = item;
   const ref = collection(database(), "users", uid, "items");
-  if (id.startsWith("item-")) return addDoc(ref, data);
   return setDoc(doc(ref, id), data, { merge: true });
 }
 

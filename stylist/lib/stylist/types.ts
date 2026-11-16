@@ -7,6 +7,8 @@ export type WardrobeItem = {
   type: string;
   color: string;
   imageUrl: string;
+  imagePath?: string;
+  tags?: string[];
   createdAt: number;
 };
 
@@ -21,6 +23,10 @@ export type Outfit = {
 export type UserProfile = {
   name: string;
   email: string;
+  bio: string;
+  photoURL: string;
+  photoPath?: string;
+  createdAt?: number;
   height: string;
   weight: string;
   stylePreferences: string;

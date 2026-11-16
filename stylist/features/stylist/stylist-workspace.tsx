@@ -24,15 +24,7 @@ import {
   UserRound,
   X,
 } from "lucide-react";
-import {
-  createUserWithEmailAndPassword,
-  onAuthStateChanged,
-  signInWithEmailAndPassword,
-  signOut,
-  updateProfile,
-  type User,
-} from "firebase/auth";
-import { auth, firebaseEnabled } from "@/lib/firebase/client";
+import { useAuth } from "@/lib/firebase/auth-context";
 import {
   addComment,
   removeItem,
@@ -41,6 +33,7 @@ import {
   savePost,
   saveProfile,
   toggleLike,
+  uploadUserImage,
   watchFeed,
   watchItems,
   watchOutfits,
@@ -58,8 +51,8 @@ const navItems: { id: Section; label: string; icon: typeof House }[] = [
 ];
 
 const categories = ["Todas", "Roupas", "Calçados", "Acessórios"];
-const emptyDraft = { name: "", category: "Roupas", type: "Blusas", color: "", imageUrl: "" };
-const blankProfile: UserProfile = { name: "", email: "", height: "", weight: "", stylePreferences: "" };
+const emptyDraft = { name: "", category: "Roupas", type: "Blusas", color: "", imageUrl: "", tags: "" };
+const blankProfile: UserProfile = { name: "", email: "", bio: "", photoURL: "", height: "", weight: "", stylePreferences: "" };
 const heroImage = "https://images.unsplash.com/photo-1539109136881-3be0616acf4b?auto=format&fit=crop&w=1400&q=90";
 
 function uid(prefix: string) {
@@ -108,15 +101,21 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
 }
 
 export default function StylistWorkspace() {
+  const authState = useAuth();
+  return <StylistWorkspaceView key={authState.user?.uid ?? "demo"} authState={authState} />;
+}
+
+function StylistWorkspaceView({ authState }: { authState: ReturnType<typeof useAuth> }) {
   const pathname = usePathname();
   const router = useRouter();
+  const { user: currentUser, loading: authReady, enabled: firebaseEnabled, login, register, logout, updateAccount } = authState;
   const section = (pathname === "/" ? "inicio" : pathname.slice(1)) as Section;
-  const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const [authReady, setAuthReady] = useState(!auth);
-  const [items, setItems] = useState(demoItems);
-  const [outfits, setOutfits] = useState(demoOutfits);
-  const [posts, setPosts] = useState(demoPosts);
-  const [profile, setProfile] = useState<UserProfile>(demoProfile);
+  const [items, setItems] = useState(() => currentUser ? [] : demoItems);
+  const [outfits, setOutfits] = useState(() => currentUser ? [] : demoOutfits);
+  const [posts, setPosts] = useState(() => currentUser ? [] : demoPosts);
+  const [profile, setProfile] = useState<UserProfile>(() => currentUser
+    ? { ...blankProfile, name: currentUser.displayName ?? "", email: currentUser.email ?? "", photoURL: currentUser.photoURL ?? "" }
+    : demoProfile);
   const [selected, setSelected] = useState<string[]>([]);
   const [categoryFilter, setCategoryFilter] = useState("Todas");
   const [search, setSearch] = useState("");
@@ -126,6 +125,9 @@ export default function StylistWorkspace() {
   const [registering, setRegistering] = useState(false);
   const [sharing, setSharing] = useState(false);
   const [itemDraft, setItemDraft] = useState(emptyDraft);
+  const [itemImage, setItemImage] = useState<File | null>(null);
+  const [profileImage, setProfileImage] = useState<File | null>(null);
+  const [profileImagePreview, setProfileImagePreview] = useState<string | null>(null);
   const [itemError, setItemError] = useState("");
   const [profileErrors, setProfileErrors] = useState<{ height?: string; weight?: string }>({});
   const [authError, setAuthError] = useState("");
@@ -134,18 +136,6 @@ export default function StylistWorkspace() {
   const [busy, setBusy] = useState(false);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [commentsOpen, setCommentsOpen] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!auth) return;
-    return onAuthStateChanged(auth, (user) => {
-      setCurrentUser(user);
-      setAuthReady(true);
-      setItems(demoItems);
-      setOutfits(demoOutfits);
-      setPosts(demoPosts);
-      setProfile(user ? { ...blankProfile, email: user.email ?? "" } : demoProfile);
-    });
-  }, []);
 
   useEffect(() => {
     if (!currentUser) return;
@@ -161,12 +151,20 @@ export default function StylistWorkspace() {
   }, [currentUser]);
 
   useEffect(() => {
+    if (!profileImagePreview) return;
+    return () => URL.revokeObjectURL(profileImagePreview);
+  }, [profileImagePreview]);
+
+  useEffect(() => {
     if (!notice) return;
     const timer = window.setTimeout(() => setNotice(""), 4200);
     return () => window.clearTimeout(timer);
   }, [notice]);
 
-  const displayName = currentUser?.displayName || profile.name || "Marina Costa";
+  const displayName = currentUser
+    ? currentUser.displayName || profile.name || currentUser.email?.split("@")[0] || "Stylist"
+    : profile.name || "Stylist";
+  const profilePhoto = profileImagePreview || profile.photoURL || currentUser?.photoURL || "/default-avatar.svg";
   const initials = displayName.split(" ").map((part) => part[0]).slice(0, 2).join("").toUpperCase();
   const filteredItems = items.filter((item) => {
     const matchesCategory = categoryFilter === "Todas" || item.category === categoryFilter;
@@ -188,7 +186,16 @@ export default function StylistWorkspace() {
 
   function openItemEditor(item?: WardrobeItem) {
     setEditingItem(item ?? null);
-    setItemDraft(item ? { name: item.name, category: item.category, type: item.type, color: item.color, imageUrl: item.imageUrl } : emptyDraft);
+    setItemDraft(item ? {
+      name: item.name,
+      category: item.category,
+      type: item.type,
+      color: item.color,
+      imageUrl: item.imageUrl,
+      tags: item.tags?.join(", ") ?? "",
+    } : emptyDraft);
+    setItemImage(null);
+    setItemError("");
     setItemModal(true);
   }
 
@@ -199,19 +206,37 @@ export default function StylistWorkspace() {
       return;
     }
     setItemError("");
-    const item: WardrobeItem = {
-      id: editingItem?.id ?? uid("item"),
-      ...itemDraft,
-      createdAt: editingItem?.createdAt ?? Date.now(),
-    };
+    const itemId = editingItem?.id ?? uid("item");
     setPendingAction("item");
     try {
+      let imageUrl = itemDraft.imageUrl;
+      let imagePath = editingItem?.imagePath;
+      if (itemImage && currentUser) {
+        const uploaded = await uploadUserImage(currentUser.uid, "items", itemId, itemImage);
+        imageUrl = uploaded.imageUrl;
+        imagePath = uploaded.imagePath;
+      } else if (itemImage) {
+        imageUrl = URL.createObjectURL(itemImage);
+      }
+
+      const item: WardrobeItem = {
+        id: itemId,
+        name: itemDraft.name.trim(),
+        category: itemDraft.category,
+        type: itemDraft.type.trim(),
+        color: itemDraft.color.trim(),
+        imageUrl,
+        ...(imagePath ? { imagePath } : {}),
+        tags: itemDraft.tags.split(",").map((tag) => tag.trim()).filter(Boolean),
+        createdAt: editingItem?.createdAt ?? Date.now(),
+      };
       if (currentUser) await saveItem(currentUser.uid, item);
       else setItems((previous) => editingItem ? previous.map((entry) => entry.id === item.id ? item : entry) : [item, ...previous]);
       setItemModal(false);
+      setItemImage(null);
       showNotice(editingItem ? "Peça atualizada." : "Peça adicionada ao closet.");
-    } catch {
-      showNotice("Não foi possível salvar a peça. Tente novamente.", "error");
+    } catch (error) {
+      setItemError(error instanceof Error ? error.message : "Não foi possível salvar a peça. Tente novamente.");
     } finally {
       setPendingAction(null);
     }
@@ -219,7 +244,7 @@ export default function StylistWorkspace() {
 
   async function deleteWardrobeItem(item: WardrobeItem) {
     if (!window.confirm(`Remover “${item.name}” do closet?`)) return;
-    if (currentUser && !item.id.startsWith("item-")) {
+    if (currentUser) {
       try { await removeItem(currentUser.uid, item.id); }
       catch { showNotice("Não foi possível remover a peça.", "error"); return; }
     } else {
@@ -266,10 +291,30 @@ export default function StylistWorkspace() {
 
     setPendingAction("profile");
     try {
-      if (currentUser) await saveProfile(currentUser.uid, { ...profile, email: currentUser.email ?? profile.email });
+      let photoURL = profile.photoURL;
+      let photoPath = profile.photoPath;
+      if (currentUser && profileImage) {
+        const uploaded = await uploadUserImage(currentUser.uid, "profile", "avatar", profileImage);
+        photoURL = uploaded.imageUrl;
+        photoPath = uploaded.imagePath;
+      }
+      const updatedProfile = {
+        ...profile,
+        name: profile.name.trim(),
+        email: currentUser?.email ?? profile.email,
+        photoURL,
+        ...(photoPath ? { photoPath } : {}),
+      };
+      if (currentUser) {
+        await updateAccount(updatedProfile.name, photoURL);
+        await saveProfile(currentUser.uid, updatedProfile);
+      }
+      setProfile(updatedProfile);
+      setProfileImage(null);
+      setProfileImagePreview(null);
       showNotice("Perfil atualizado.");
-    } catch {
-      showNotice("Não foi possível salvar seu perfil.", "error");
+    } catch (error) {
+      showNotice(error instanceof Error ? error.message : "Não foi possível salvar seu perfil.", "error");
     } finally {
       setPendingAction(null);
     }
@@ -277,7 +322,6 @@ export default function StylistWorkspace() {
 
   async function submitAuth(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!auth) { setAuthError("Configure as variáveis NEXT_PUBLIC_FIREBASE no ambiente para ativar sua conta."); return; }
     setBusy(true);
     setAuthError("");
     const form = new FormData(event.currentTarget);
@@ -286,12 +330,8 @@ export default function StylistWorkspace() {
     const name = String(form.get("name") ?? "").trim();
     try {
       if (registering) {
-        const credential = await createUserWithEmailAndPassword(auth, email, password);
-        if (name) await updateProfile(credential.user, { displayName: name });
-        const newProfile = { ...blankProfile, name, email };
-        await saveProfile(credential.user.uid, newProfile);
-        setProfile(newProfile);
-      } else await signInWithEmailAndPassword(auth, email, password);
+        await register(name, email, password);
+      } else await login(email, password);
       setAuthModal(false);
     } catch (error) {
       setAuthError(error instanceof Error ? error.message : "Não foi possível entrar. Confira seus dados.");
@@ -341,6 +381,14 @@ export default function StylistWorkspace() {
     } else setPosts((previous) => previous.map((entry) => entry.id === post.id ? { ...entry, commentsCount: entry.commentsCount + 1 } : entry));
     event.currentTarget.reset();
     showNotice("Comentário enviado.");
+  }
+
+  async function handleLogout() {
+    try {
+      await logout();
+    } catch (error) {
+      showNotice(error instanceof Error ? error.message : "Não foi possível sair da conta.", "error");
+    }
   }
 
   function ImageTile({ item, selectable = false }: { item: WardrobeItem; selectable?: boolean }) {
@@ -399,9 +447,9 @@ export default function StylistWorkspace() {
         </nav>
         <div className="mt-auto border-t border-[#e5e3dc] pt-5">
           <div className="mb-4 flex items-center gap-3">
-            <span className="grid size-9 shrink-0 place-items-center rounded-full bg-[#e6d5c8] text-[11px] font-semibold text-[#6a5142]">{initials}</span>
+            <span className="relative grid size-9 shrink-0 place-items-center overflow-hidden rounded-full bg-[#e6d5c8] text-[11px] font-semibold text-[#6a5142]"><Image src={profilePhoto} alt="" fill unoptimized sizes="36px" className="object-cover" /></span>
             <span className="min-w-0 flex-1"><span className="block truncate text-xs font-semibold text-[#3a4037]">{displayName}</span><span className="mt-0.5 block truncate text-[10px] text-[#8d8e84]">{currentUser?.email ?? "Seu espaço pessoal"}</span></span>
-            {currentUser ? <button type="button" title="Sair da conta" aria-label="Sair da conta" onClick={() => auth && void signOut(auth)} className="grid size-8 place-items-center text-[#85877d] hover:text-[#b74e3d]"><LogOut size={15} /></button> : null}
+            {currentUser ? <button type="button" title="Sair da conta" aria-label="Sair da conta" onClick={() => void handleLogout()} className="grid size-8 place-items-center text-[#85877d] hover:text-[#b74e3d]"><LogOut size={15} /></button> : null}
           </div>
           {!currentUser ? <button type="button" onClick={() => { setRegistering(false); setAuthModal(true); }} className="flex h-10 w-full items-center justify-center gap-2 border border-[#d9ded5] text-xs font-semibold text-[#46604c] transition hover:bg-[#eef1eb]"><LogIn size={15} />Entrar ou criar conta</button> : <span className="flex items-center gap-2 px-1 text-[10px] text-[#62806a]"><span className="size-1.5 rounded-full bg-[#749479]" />Conta sincronizada</span>}
         </div>
@@ -413,13 +461,13 @@ export default function StylistWorkspace() {
           <div className="hidden items-center gap-2 text-xs text-[#96968c] lg:flex"><span>Seu espaço</span><span>/</span><span className="font-medium text-[#4b5349]">{navItems.find((item) => item.id === section)?.label}</span></div>
           <div className="ml-auto flex items-center gap-3">
             {!firebaseEnabled ? <span className="hidden items-center gap-1.5 border border-[#e4d9c3] bg-[#f5eddf] px-2.5 py-1.5 text-[10px] font-medium text-[#897047] sm:flex"><span className="size-1.5 rounded-full bg-[#c79b55]" />Modo demonstração</span> : null}
-            <button type="button" onClick={() => { setRegistering(false); setAuthModal(true); }} className="flex items-center gap-2 text-left" title={currentUser ? currentUser.email ?? "Perfil" : "Entrar na conta"}><span className="grid size-8 place-items-center rounded-full bg-[#e6d5c8] text-[10px] font-semibold text-[#6a5142]">{initials}</span><ChevronDown className="hidden text-[#85877d] sm:block" size={13} /></button>
+            <button type="button" onClick={() => currentUser ? navigateToSection("perfil") : (setRegistering(false), setAuthModal(true))} className="flex items-center gap-2 text-left" title={currentUser ? currentUser.email ?? "Perfil" : "Entrar na conta"}><span className="relative grid size-8 place-items-center overflow-hidden rounded-full bg-[#e6d5c8] text-[10px] font-semibold text-[#6a5142]"><Image src={profilePhoto} alt="" fill unoptimized sizes="32px" className="object-cover" /></span><ChevronDown className="hidden text-[#85877d] sm:block" size={13} /></button>
           </div>
         </header>
 
         <nav className="sticky top-[78px] z-20 flex overflow-x-auto border-b border-[#e5e3dc] bg-[#f8f7f2] px-3 py-2 lg:hidden" aria-label="Navegação móvel">
           {navItems.map(({ id, label, icon: Icon }) => <button key={id} type="button" onClick={() => navigateToSection(id)} aria-current={section === id ? "page" : undefined} className={`flex min-h-10 shrink-0 items-center gap-2 px-3 text-xs ${section === id ? "border-b-2 border-[#48624d] font-semibold text-[#314c3c]" : "text-[#777c70]"}`}><Icon size={15} />{label}</button>)}
-          {!currentUser ? <button type="button" onClick={() => { setRegistering(false); setAuthModal(true); }} className="ml-auto flex shrink-0 items-center gap-1.5 px-3 text-xs font-semibold text-[#48624d]"><LogIn size={15} />Entrar</button> : <button type="button" onClick={() => auth && void signOut(auth)} aria-label="Sair da conta" className="ml-auto grid size-10 shrink-0 place-items-center text-[#777c70]"><LogOut size={15} /></button>}
+          {!currentUser ? <button type="button" onClick={() => { setRegistering(false); setAuthModal(true); }} className="ml-auto flex shrink-0 items-center gap-1.5 px-3 text-xs font-semibold text-[#48624d]"><LogIn size={15} />Entrar</button> : <button type="button" onClick={() => void handleLogout()} aria-label="Sair da conta" className="ml-auto grid size-10 shrink-0 place-items-center text-[#777c70]"><LogOut size={15} /></button>}
         </nav>
 
         <main className="mx-auto max-w-[1440px] px-4 pb-16 pt-8 sm:px-8 sm:pt-10 lg:px-12 lg:pt-12">
@@ -492,8 +540,8 @@ export default function StylistWorkspace() {
             {section === "perfil" ? <>
               <div className="mb-8"><p className="mb-3 text-[10px] font-bold uppercase tracking-[0.2em] text-[#929287]">{sectionTitle.perfil.eyebrow}</p><h1 className="font-display text-[42px] leading-none text-[#29362c]">Seu perfil</h1><p className="mt-3 text-sm text-[#7e8176]">{sectionTitle.perfil.detail}</p></div>
               <div className="grid gap-10 lg:grid-cols-[0.72fr_1.28fr]">
-                <section className="border-y border-[#e2e0d8] py-6"><div className="flex items-center gap-4"><span className="grid size-16 place-items-center rounded-full bg-[#e6d5c8] font-display text-[22px] text-[#6a5142]">{initials}</span><div><h2 className="font-display text-[25px] text-[#333c32]">{displayName}</h2><p className="mt-1 text-xs text-[#8d8f84]">{currentUser?.email ?? profile.email}</p></div></div><div className="mt-7 grid grid-cols-2 gap-3"><div className="bg-[#eae9e2] p-4"><span className="text-[9px] font-bold uppercase tracking-[0.16em] text-[#929388]">Altura</span><p className="mt-2 font-display text-2xl text-[#384238]">{profile.height || "—"}<span className="ml-1 text-xs">m</span></p></div><div className="bg-[#eae9e2] p-4"><span className="text-[9px] font-bold uppercase tracking-[0.16em] text-[#929388]">Peso</span><p className="mt-2 font-display text-2xl text-[#384238]">{profile.weight || "—"}<span className="ml-1 text-xs">kg</span></p></div></div><div className="mt-5 flex justify-between border-b border-[#e3e1d9] py-3 text-xs"><span className="text-[#85877d]">Peças no closet</span><span className="font-semibold text-[#485146]">{items.length}</span></div><div className="flex justify-between border-b border-[#e3e1d9] py-3 text-xs"><span className="text-[#85877d]">Looks favoritos</span><span className="font-semibold text-[#485146]">{favoriteCount}</span></div><p className="mt-5 flex items-start gap-2 text-[10px] leading-5 text-[#999a90]"><CircleHelp size={14} className="mt-0.5 shrink-0" />Suas medidas ficam visíveis apenas para você.</p></section>
-                <form onSubmit={(event) => void submitProfile(event)} className="grid content-start gap-5 border-y border-[#e2e0d8] py-6"><div className="mb-1"><p className="text-[9px] font-bold uppercase tracking-[0.17em] text-[#999a90]">INFORMAÇÕES PESSOAIS</p><h2 className="mt-1 font-display text-[26px] text-[#333c32]">Medidas e preferências</h2></div><Field label="Como podemos te chamar?" value={profile.name} onChange={(event) => setProfile((previous) => ({ ...previous, name: event.target.value }))} placeholder="Seu nome" /><div className="grid grid-cols-2 gap-4"><div className="grid content-start gap-2"><Field label="Altura (m)" inputMode="decimal" maxLength={4} aria-invalid={Boolean(profileErrors.height)} aria-describedby={profileErrors.height ? "height-error" : undefined} value={profile.height} onChange={(event) => { setProfile((previous) => ({ ...previous, height: maskMeasurement(event.target.value, 1, 2) })); setProfileErrors((previous) => ({ ...previous, height: undefined })); }} placeholder="1,68" />{profileErrors.height ? <p id="height-error" role="alert" className="text-[10px] leading-4 text-[#b74e3d]">{profileErrors.height}</p> : null}</div><div className="grid content-start gap-2"><Field label="Peso (kg)" inputMode="decimal" maxLength={5} aria-invalid={Boolean(profileErrors.weight)} aria-describedby={profileErrors.weight ? "weight-error" : undefined} value={profile.weight} onChange={(event) => { setProfile((previous) => ({ ...previous, weight: maskMeasurement(event.target.value, 3, 1) })); setProfileErrors((previous) => ({ ...previous, weight: undefined })); }} placeholder="58" />{profileErrors.weight ? <p id="weight-error" role="alert" className="text-[10px] leading-4 text-[#b74e3d]">{profileErrors.weight}</p> : null}</div></div><label className="grid gap-2 text-xs font-semibold text-[#555d50]">Preferências de estilo<textarea rows={4} value={profile.stylePreferences} onChange={(event) => setProfile((previous) => ({ ...previous, stylePreferences: event.target.value }))} placeholder="Cores, referências, tecidos..." className="resize-y border border-[#dfded7] bg-white px-3 py-3 text-sm font-normal text-[#252b24] outline-none focus:border-[#58725f] focus:ring-2 focus:ring-[#58725f]/10" /></label><div><button type="submit" disabled={pendingAction === "profile"} className="flex h-11 items-center gap-2 bg-[#314c3c] px-5 text-xs font-semibold text-white hover:bg-[#253b2d] disabled:cursor-wait disabled:opacity-60">{pendingAction === "profile" ? <><LoaderCircle size={15} className="animate-spin" />Salvando…</> : <><Check size={15} />Salvar perfil</>}</button></div></form>
+                <section className="border-y border-[#e2e0d8] py-6"><div className="flex items-center gap-4"><span className="relative grid size-16 place-items-center overflow-hidden rounded-full bg-[#e6d5c8] font-display text-[22px] text-[#6a5142]"><Image src={profilePhoto} alt="" fill unoptimized sizes="64px" className="object-cover" /></span><div><h2 className="font-display text-[25px] text-[#333c32]">{displayName}</h2><p className="mt-1 text-xs text-[#8d8f84]">{currentUser?.email ?? profile.email}</p></div></div><div className="mt-4 text-sm leading-6 text-[#777c70]">{profile.bio || "Adicione uma bio para contar um pouco sobre seu estilo."}</div><div className="mt-7 grid grid-cols-2 gap-3"><div className="bg-[#eae9e2] p-4"><span className="text-[9px] font-bold uppercase tracking-[0.16em] text-[#929388]">Altura</span><p className="mt-2 font-display text-2xl text-[#384238]">{profile.height || "—"}<span className="ml-1 text-xs">m</span></p></div><div className="bg-[#eae9e2] p-4"><span className="text-[9px] font-bold uppercase tracking-[0.16em] text-[#929388]">Peso</span><p className="mt-2 font-display text-2xl text-[#384238]">{profile.weight || "—"}<span className="ml-1 text-xs">kg</span></p></div></div><div className="mt-5 flex justify-between border-b border-[#e3e1d9] py-3 text-xs"><span className="text-[#85877d]">Peças no closet</span><span className="font-semibold text-[#485146]">{items.length}</span></div><div className="flex justify-between border-b border-[#e3e1d9] py-3 text-xs"><span className="text-[#85877d]">Looks favoritos</span><span className="font-semibold text-[#485146]">{favoriteCount}</span></div><p className="mt-5 flex items-start gap-2 text-[10px] leading-5 text-[#999a90]"><CircleHelp size={14} className="mt-0.5 shrink-0" />Suas medidas ficam visíveis apenas para você.</p></section>
+                <form onSubmit={(event) => void submitProfile(event)} className="grid content-start gap-5 border-y border-[#e2e0d8] py-6"><div className="mb-1"><p className="text-[9px] font-bold uppercase tracking-[0.17em] text-[#999a90]">INFORMAÇÕES PESSOAIS</p><h2 className="mt-1 font-display text-[26px] text-[#333c32]">Perfil e preferências</h2></div><Field label="Como podemos te chamar?" required value={profile.name} onChange={(event) => setProfile((previous) => ({ ...previous, name: event.target.value }))} placeholder="Seu nome" /><label className="grid gap-2 text-xs font-semibold text-[#555d50]">Foto de perfil<input type="file" accept="image/*" disabled={!currentUser} onChange={(event) => { const file = event.target.files?.[0] ?? null; setProfileImage(file); setProfileImagePreview(file ? URL.createObjectURL(file) : null); }} className="w-full border border-[#dfded7] bg-white px-3 py-2 text-xs font-normal" />{!currentUser ? <span className="text-[10px] font-normal text-[#929388]">Entre na sua conta para salvar uma foto de perfil.</span> : null}</label><label className="grid gap-2 text-xs font-semibold text-[#555d50]">Bio<textarea rows={3} maxLength={240} value={profile.bio} onChange={(event) => setProfile((previous) => ({ ...previous, bio: event.target.value }))} placeholder="Conte um pouco sobre seu estilo..." className="resize-y border border-[#dfded7] bg-white px-3 py-3 text-sm font-normal text-[#252b24] outline-none focus:border-[#58725f] focus:ring-2 focus:ring-[#58725f]/10" /></label><div className="grid grid-cols-2 gap-4"><div className="grid content-start gap-2"><Field label="Altura (m)" inputMode="decimal" maxLength={4} aria-invalid={Boolean(profileErrors.height)} aria-describedby={profileErrors.height ? "height-error" : undefined} value={profile.height} onChange={(event) => { setProfile((previous) => ({ ...previous, height: maskMeasurement(event.target.value, 1, 2) })); setProfileErrors((previous) => ({ ...previous, height: undefined })); }} placeholder="1,68" />{profileErrors.height ? <p id="height-error" role="alert" className="text-[10px] leading-4 text-[#b74e3d]">{profileErrors.height}</p> : null}</div><div className="grid content-start gap-2"><Field label="Peso (kg)" inputMode="decimal" maxLength={5} aria-invalid={Boolean(profileErrors.weight)} aria-describedby={profileErrors.weight ? "weight-error" : undefined} value={profile.weight} onChange={(event) => { setProfile((previous) => ({ ...previous, weight: maskMeasurement(event.target.value, 3, 1) })); setProfileErrors((previous) => ({ ...previous, weight: undefined })); }} placeholder="58" />{profileErrors.weight ? <p id="weight-error" role="alert" className="text-[10px] leading-4 text-[#b74e3d]">{profileErrors.weight}</p> : null}</div></div><label className="grid gap-2 text-xs font-semibold text-[#555d50]">Preferências de estilo<textarea rows={4} value={profile.stylePreferences} onChange={(event) => setProfile((previous) => ({ ...previous, stylePreferences: event.target.value }))} placeholder="Cores, referências, tecidos..." className="resize-y border border-[#dfded7] bg-white px-3 py-3 text-sm font-normal text-[#252b24] outline-none focus:border-[#58725f] focus:ring-2 focus:ring-[#58725f]/10" /></label><div><button type="submit" disabled={pendingAction === "profile"} className="flex h-11 items-center gap-2 bg-[#314c3c] px-5 text-xs font-semibold text-white hover:bg-[#253b2d] disabled:cursor-wait disabled:opacity-60">{pendingAction === "profile" ? <><LoaderCircle size={15} className="animate-spin" />Salvando…</> : <><Check size={15} />Salvar perfil</>}</button></div></form>
               </div>
             </> : null}
           </div>
@@ -509,9 +557,11 @@ export default function StylistWorkspace() {
           <Field label="Nome da peça" required autoFocus value={itemDraft.name} onChange={(event) => { setItemDraft((draft) => ({ ...draft, name: event.target.value })); setItemError(""); }} placeholder="Ex.: camisa de linho" />
           <div className="grid grid-cols-2 gap-4"><label className="grid gap-2 text-xs font-semibold text-[#555d50]">Categoria<select value={itemDraft.category} onChange={(event) => setItemDraft((draft) => ({ ...draft, category: event.target.value }))} className="h-11 border border-[#dfded7] bg-white px-3 text-sm font-normal outline-none focus:border-[#58725f]"><option>Roupas</option><option>Calçados</option><option>Acessórios</option></select></label><Field label="Tipo" required value={itemDraft.type} onChange={(event) => { setItemDraft((draft) => ({ ...draft, type: event.target.value })); setItemError(""); }} placeholder="Ex.: blusas" /></div>
           <Field label="Cor principal" required value={itemDraft.color} onChange={(event) => { setItemDraft((draft) => ({ ...draft, color: event.target.value })); setItemError(""); }} placeholder="Ex.: verde oliva" />
-          <Field label="URL da imagem" type="url" value={itemDraft.imageUrl} onChange={(event) => setItemDraft((draft) => ({ ...draft, imageUrl: event.target.value }))} placeholder="https://..." />
+          <label className="grid gap-2 text-xs font-semibold text-[#555d50]">Foto da peça<input type="file" accept="image/*" onChange={(event) => { setItemImage(event.target.files?.[0] ?? null); setItemError(""); }} className="w-full border border-[#dfded7] bg-white px-3 py-2 text-xs font-normal" />{itemImage ? <span className="text-[10px] font-normal text-[#929388]">{itemImage.name}</span> : null}</label>
+          <Field label="URL da imagem (opcional)" type="url" value={itemDraft.imageUrl} onChange={(event) => setItemDraft((draft) => ({ ...draft, imageUrl: event.target.value }))} placeholder="https://..." />
+          <Field label="Tags (separadas por vírgula)" value={itemDraft.tags} onChange={(event) => setItemDraft((draft) => ({ ...draft, tags: event.target.value }))} placeholder="Ex.: casual, verão, trabalho" />
           {itemError ? <p role="alert" className="border-l-2 border-[#c56750] bg-[#f7eae5] px-3 py-2 text-xs text-[#914937]">{itemError}</p> : null}
-          <p className="-mt-1 text-[10px] leading-5 text-[#929388]">Use um link público para a imagem. O arquivo fica associado à peça no seu closet.</p>
+          <p className="-mt-1 text-[10px] leading-5 text-[#929388]">Imagens enviadas ficam no seu Firebase Storage e devem ter até 10 MB.</p>
           <button type="submit" disabled={pendingAction === "item"} className="mt-2 flex h-11 items-center justify-center gap-2 bg-[#314c3c] text-xs font-semibold text-white hover:bg-[#253b2d] disabled:cursor-wait disabled:opacity-60">{pendingAction === "item" ? <><LoaderCircle size={15} className="animate-spin" />Salvando…</> : <><Check size={15} />{editingItem ? "Salvar alterações" : "Adicionar ao closet"}</>}</button>
         </form>
       </Modal> : null}

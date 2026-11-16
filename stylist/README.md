@@ -4,17 +4,17 @@ Guarda-roupa digital para organizar peças, criar looks e compartilhar combinaç
 
 ## Configuração Firebase
 
-Sem credenciais, o app abre em modo de demonstração. Para habilitar Auth e Firestore, defina `NEXT_PUBLIC_FIREBASE_API_KEY`, `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN`, `NEXT_PUBLIC_FIREBASE_PROJECT_ID` e `NEXT_PUBLIC_FIREBASE_APP_ID` no ambiente local. Ative Email/senha no Firebase Authentication e publique `firestore.rules`.
+Sem credenciais, o app abre em modo de demonstração. Para habilitar o Firebase, defina `NEXT_PUBLIC_FIREBASE_API_KEY`, `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN`, `NEXT_PUBLIC_FIREBASE_PROJECT_ID`, `NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET`, `NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID` e `NEXT_PUBLIC_FIREBASE_APP_ID` no ambiente local. Ative Email/senha no Firebase Authentication e publique `firestore.rules` e `storage.rules`.
 
-O perfil, as peças e os looks ficam sob `users/{uid}`; as regras impedem que outra conta leia ou altere esses documentos. Publicações e comentários são visíveis a usuários autenticados. Imagens são guardadas como URLs; uploads diretos exigem Firebase Storage e regras próprias.
+O perfil, as peças e os looks ficam sob `users/{uid}`; as regras impedem que outra conta leia ou altere esses documentos. Publicações e comentários são visíveis a usuários autenticados. Fotos de perfil e peças são enviadas para `users/{uid}/profile` e `users/{uid}/items` no Firebase Storage, com limite de 10 MB por imagem.
 
 ## Estrutura
 
 - `app/`: rota e layout do App Router.
 - `features/stylist/`: experiência principal e fluxos do produto.
-- `lib/firebase/`: inicialização do Firebase no cliente.
+- `lib/firebase/`: inicialização do Firebase no cliente e contexto global de autenticação.
 - `lib/stylist/`: tipos, dados de demonstração e persistência Firestore.
-- `firestore.rules`: regras de isolamento e permissões do feed.
+- `firestore.rules` e `storage.rules`: regras de isolamento dos dados e arquivos.
 
 ## Getting Started
 
