@@ -1,1 +1,0 @@
-export { auth, db, firebaseEnabled, storage } from "./firebase/client";

@@ -4,17 +4,16 @@ export type WardrobeItem = {
   id: string;
   name: string;
   category: string;
-  type: string;
   color: string;
+  style: string;
   imageUrl: string;
-  imagePath?: string;
-  tags?: string[];
   createdAt: number;
 };
 
 export type Outfit = {
   id: string;
   name: string;
+  occasion: string;
   itemIds: string[];
   favorite: boolean;
   createdAt: number;
@@ -25,11 +24,20 @@ export type UserProfile = {
   email: string;
   bio: string;
   photoURL: string;
-  photoPath?: string;
   createdAt?: number;
-  height: string;
-  weight: string;
   stylePreferences: string;
+  colorPalette: string;
+};
+
+export type OutfitPiece = Pick<WardrobeItem, "id" | "name" | "category" | "color" | "style" | "imageUrl">;
+
+export type CommunityComment = {
+  id: string;
+  uid: string;
+  author: string;
+  avatar: string;
+  text: string;
+  createdAt: number;
 };
 
 export type CommunityPost = {
@@ -37,8 +45,9 @@ export type CommunityPost = {
   ownerId: string;
   author: string;
   handle: string;
-  avatar: string;
-  imageUrl: string;
+  avatarUrl: string;
+  occasion: string;
+  items: OutfitPiece[];
   caption: string;
   likes: string[];
   commentsCount: number;
